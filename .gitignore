@@ -25,3 +25,6 @@ coverage/
 # Dados gerados em runtime (histórico de lotes, snapshots — podem ter nomes de arquivos e valores)
 rfq/data/batch-history/
 rfq/data/batch-snapshots/
+
+# Pasta temporária usada para gerar os PDFs da documentação
+build-pdfs/
