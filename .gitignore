@@ -1,0 +1,27 @@
+node_modules/
+
+# Chaves e segredos (nunca commitar)
+.env
+.env.local
+.env.*.local
+.env*.backup
+*.pem
+*.p12
+secrets/
+credentials.json
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Dados gerados em runtime (histórico de lotes, snapshots — podem ter nomes de arquivos e valores)
+rfq/data/batch-history/
+rfq/data/batch-snapshots/
