@@ -2,6 +2,8 @@
 
 **Projeto:** Comparador de cotações Suprimentos Dream (Node.js + Express + OpenAI)
 **Repositório:** https://github.com/TecnologiaDreamFactory/suprimentos-dream
+**URL em produção:** https://suprimentos-dream-production.up.railway.app
+**Status:** EM PRODUÇÃO
 **Responsável técnico:** Almir Almeida (conta GitHub: `TecnologiaDreamFactory`)
 **Última atualização do guia:** 21/04/2026
 
@@ -175,8 +177,10 @@ Branch local `main` já rastreando `origin/main`.
 
 ## Etapa 4 — Deploy no Railway
 
-**Status:** [EM ANDAMENTO — aguardando execução manual]
-**Tempo estimado:** 10–15 minutos na primeira vez
+**Status:** [CONCLUÍDO]
+**Data da publicação:** 21/04/2026
+**URL pública:** https://suprimentos-dream-production.up.railway.app
+**Tempo real gasto:** ~12 minutos (criar projeto + colar variáveis + gerar domínio + aguardar build)
 **Custo:** ver seção 8 (plano Free tem US$ 5 de crédito único; Hobby custa US$ 5/mês)
 
 O Railway não pode ser automatizado aqui porque exige login interativo via navegador. O passo a passo abaixo é feito pela interface web do Railway.
@@ -242,15 +246,17 @@ NODE_ENV=production
 
 ### 4.5. Resultado
 
-- URL pública: *(a preencher após deploy)*
-- Data/hora da primeira publicação: *(a preencher)*
-- Custo do primeiro mês: *(a preencher)*
+- **URL pública:** https://suprimentos-dream-production.up.railway.app
+- **Data da primeira publicação:** 21/04/2026
+- **Variáveis configuradas:** 14 (13 `OPENAI_*` + `NODE_ENV=production`)
+- **Status do serviço:** Active (log exibiu `🚀 SUPRIMENTOS DREAM — comparador de cotações` e `🔑 API OpenAI: ✅ Configurada`)
+- **Custo até o momento:** consumindo crédito do Trial (US$ 5 inicial); migração para Hobby (US$ 5/mês) recomendada antes de esgotar
 
 ---
 
 ## Etapa 5 — Pós-deploy e operação
 
-**Status:** [PENDENTE]
+**Status:** [ATIVO — aplicação em produção]
 
 ### 5.1. Fluxo para publicar atualizações
 
@@ -389,3 +395,4 @@ Após o projeto em produção, ativar no GitHub:
 | Data/Hora | Etapa atualizada | Observação |
 |---|---|---|
 | 21/04/2026 | Criação inicial | Etapas 1–3 concluídas; Etapa 4 documentada, aguardando execução |
+| 21/04/2026 | Etapa 4 concluída | Deploy no Railway efetivado. URL pública gerada: `suprimentos-dream-production.up.railway.app`. Aplicação respondendo em produção. |
