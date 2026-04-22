@@ -93,6 +93,10 @@ try {
 const BATCH_ID_PATH_RE = /^B-\d+-[a-f0-9]+$/;
 
 const app = express();
+// Atrás de proxies (Railway/Cloudflare): respeita X-Forwarded-Proto para que
+// req.protocol devolva "https" e as URLs de download sejam absolutas corretas.
+// Sem isso, Chrome/Edge bloqueiam downloads como Mixed Content (http dentro de https).
+app.set("trust proxy", 1);
 const upload = multer({ storage: multer.memoryStorage() });
 
 const rateLimitCompare = createRateLimiter({
@@ -421,7 +425,8 @@ app.post(
       result.downloadUrl = `${publicBase}/downloads/${fn}`;
     } else {
       const host = req.get("host") || `localhost:${process.env.PORT || 3000}`;
-      const proto = req.protocol || "http";
+      const fwdProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+      const proto = fwdProto || req.protocol || "http";
       result.downloadUrl = `${proto}://${host}${rel.startsWith("/") ? rel : `/${rel}`}`;
     }
 
