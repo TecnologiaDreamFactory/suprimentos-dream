@@ -18,14 +18,9 @@ const REPO_ROOT = (() => {
 
 const { parseRfqFromUrl, parseExcelToCanonical } = require(path.join(REPO_ROOT, "rfq", "parser"));
 const { parseWithPipeline } = require(path.join(REPO_ROOT, "rfq", "pipeline"));
-const { runCompareBatch, generateBatchId } = require(path.join(REPO_ROOT, "rfq", "batch", "compareBatch"));
-const { validateFileCount } = require(path.join(REPO_ROOT, "rfq", "batch", "validateBatch"));
+const { runCompareBatch } = require(path.join(REPO_ROOT, "rfq", "batch", "compareBatch"));
 const { BATCH_ERROR_CODES } = require(path.join(REPO_ROOT, "rfq", "batch", "batchTypes"));
-const { BATCH_API_VERSION } = require(path.join(REPO_ROOT, "rfq", "batch", "reviewSummary"));
-const {
-  shapeCompareBatchResponse,
-  shapeBatchStatusResponse,
-} = require(path.join(REPO_ROOT, "rfq", "batch", "batchResponse"));
+const { shapeCompareBatchResponse } = require(path.join(REPO_ROOT, "rfq", "batch", "batchResponse"));
 const { scheduleBatchExportCleanup } = require(path.join(REPO_ROOT, "rfq", "batch", "batchExportCleanup"));
 const {
   validateDownloadToken,
@@ -74,37 +69,6 @@ try {
   console.error("⚠️  Diretório de export batch:", e.message);
 }
 
-/**
- * Sweep de startup: marca como `error` lotes que ficaram em `processing`
- * por mais de BATCH_ORPHAN_PROCESSING_MS. Acontece quando o processo
- * é reiniciado (redeploy no Railway, crash) enquanto um job estava em background.
- */
-function sweepOrphanedPendingBatches() {
-  try {
-    const pending = batchHistoryStore.listPendingBatches();
-    if (!pending.length) return;
-    const now = Date.now();
-    let fixed = 0;
-    for (const rec of pending) {
-      const startedAt = rec.job_started_at ? Date.parse(rec.job_started_at) : null;
-      if (!startedAt || Number.isNaN(startedAt)) continue;
-      if (now - startedAt < BATCH_ORPHAN_PROCESSING_MS) continue;
-      batchHistoryStore.updateJobStatus(rec.batch_id, {
-        job_status: "error",
-        job_error: {
-          code: "ORPHANED_ON_RESTART",
-          message: "Processamento interrompido por restart do servidor.",
-        },
-      });
-      fixed++;
-    }
-    if (fixed > 0) {
-      console.log(`[batch-async] sweep: ${fixed} lotes marcados como error por órfão.`);
-    }
-  } catch (e) {
-    console.warn("[batch-async] sweep falhou:", e && e.message);
-  }
-}
 scheduleBatchExportCleanup(BATCH_EXPORT_DIR, { onStartup: true });
 scheduleRetentionCleanup(
   {
@@ -126,34 +90,7 @@ try {
   console.error("⚠️  Diretório batch-snapshots:", e.message);
 }
 
-sweepOrphanedPendingBatches();
-
 const BATCH_ID_PATH_RE = /^B-\d+-[a-f0-9]+$/;
-
-/**
- * Cache em memória: batchId → resultado completo (já shaped) para devolver via GET /status.
- * TTL curto — suficiente para o ciclo de polling do cliente. Após o TTL, o GET /status
- * devolve um fallback enxuto a partir do record histórico (o XLSX continua disponível
- * pelo endpoint /api/compare-batch/:id normal).
- */
-const batchResultCache = new Map();
-const BATCH_RESULT_CACHE_TTL_MS = Math.max(
-  60 * 1000,
-  parseInt(process.env.BATCH_RESULT_CACHE_TTL_MS || String(30 * 60 * 1000), 10) || 30 * 60 * 1000
-);
-function scheduleResultCacheCleanup(batchId) {
-  const t = setTimeout(() => batchResultCache.delete(batchId), BATCH_RESULT_CACHE_TTL_MS);
-  if (typeof t.unref === "function") t.unref();
-}
-
-/**
- * Limite para considerar um lote `processing` como órfão (provavelmente o processo
- * foi reiniciado antes do background concluir). Varrido no startup.
- */
-const BATCH_ORPHAN_PROCESSING_MS = Math.max(
-  60 * 1000,
-  parseInt(process.env.BATCH_ORPHAN_PROCESSING_MS || String(15 * 60 * 1000), 10) || 15 * 60 * 1000
-);
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -423,142 +360,8 @@ app.post(
 );
 
 /**
- * Absoluiza `downloadUrl` respeitando BATCH_EXPORT_PUBLIC_BASE_URL quando
- * definido (mesma regra do handler síncrono antigo).
- */
-function absolutizeDownloadUrl(result, ctx) {
-  const rel = result.downloadUrl || `/downloads/${result.export_filename}`;
-  const publicBase = getBatchExportPublicBaseUrl();
-  if (publicBase) {
-    const fn = encodeURIComponent(result.export_filename || "").replace(/%2F/g, "/");
-    return `${publicBase}/downloads/${fn}`;
-  }
-  const host = ctx.host || `localhost:${process.env.PORT || 3000}`;
-  const proto = ctx.proto || "http";
-  return `${proto}://${host}${rel.startsWith("/") ? rel : `/${rel}`}`;
-}
-
-/**
- * Executa o runCompareBatch em background, persiste histórico/snapshot e
- * atualiza `job_status` do record. Nunca faz throw — toda falha é capturada
- * e refletida em `job_status=error`.
- */
-async function processBatchInBackground(ctx) {
-  const {
-    batchId, fileSpecs, skipOpenAI, sharedQuotationId, debug,
-    host, proto, fileNames, requestId, startTime,
-  } = ctx;
-  try {
-    const result = await runCompareBatch({
-      files: fileSpecs,
-      options: {
-        batchId,
-        skipOpenAI,
-        tempDir: BATCH_EXPORT_DIR,
-        publicDownloadPath: "/downloads",
-        sharedQuotationId,
-      },
-    });
-
-    if (result.status === "error") {
-      const errorCode = result.code || "PIPELINE_ERROR";
-      batchHistoryStore.updateJobStatus(batchId, {
-        job_status: "error",
-        job_error: { code: errorCode, message: result.error || "Erro no pipeline." },
-      });
-      batchResultCache.set(batchId, shapeCompareBatchResponse(result, debug));
-      scheduleResultCacheCleanup(batchId);
-      logBatchEvent({
-        event: "batch_compare_error",
-        route: "background",
-        batch_id: batchId,
-        request_id: requestId,
-        status: "pipeline_error",
-        http_status: 0,
-        execution_ms: Date.now() - startTime,
-      });
-      return;
-    }
-
-    result.downloadUrl = absolutizeDownloadUrl(result, { host, proto });
-
-    try {
-      const snap = batchSnapshotStore.buildSnapshotFromCompareResult(result);
-      const snapInfo = batchSnapshotStore.saveSnapshot(result.batch_id, snap);
-      const exportMeta = getBatchExportStore().getMetadataForFile(result.export_filename);
-      batchHistoryStore.saveBatchRecord({
-        batch_id: result.batch_id,
-        created_at: result.created_at,
-        job_status: "ready",
-        job_started_at: result.created_at,
-        job_finished_at: new Date().toISOString(),
-        request_summary: {
-          files_received: result.files_received,
-          file_names: fileNames,
-        },
-        review_summary: result.review_summary,
-        ai_comparison_feedback: result.ai_comparison_feedback,
-        comparison_result_summary: result.comparison_result_summary,
-        export_filename: result.export_filename,
-        export_path: result.export_filename,
-        ...exportMeta,
-        export_generated_at: result.export_generated_at,
-        export_last_updated_at: result.export_last_updated_at,
-        snapshot_relative_path: snapInfo.relative,
-        snapshot_created_at: new Date().toISOString(),
-        decision_status: result.decision_status,
-        metrics_summary: result.metrics_summary,
-        audit_log: [],
-      });
-    } catch (persistErr) {
-      console.error("[batch-history] persist:", persistErr.message);
-      batchHistoryStore.updateJobStatus(batchId, { job_status: "ready" });
-    }
-
-    batchResultCache.set(batchId, shapeCompareBatchResponse(result, debug));
-    scheduleResultCacheCleanup(batchId);
-
-    logBatchEvent({
-      event: "batch_compare_ready",
-      route: "background",
-      batch_id: batchId,
-      request_id: requestId,
-      status: "ok",
-      http_status: 200,
-      execution_ms: Date.now() - startTime,
-    });
-  } catch (err) {
-    console.error("[batch-async] pipeline error:", err && err.message);
-    try {
-      batchHistoryStore.updateJobStatus(batchId, {
-        job_status: "error",
-        job_error: {
-          code: "INTERNAL_ERROR",
-          message: err && err.message ? err.message : "Erro interno ao processar lote.",
-        },
-      });
-    } catch (_e) {
-      /* ignore — já logado acima */
-    }
-    logBatchEvent({
-      event: "batch_compare_error",
-      route: "background",
-      batch_id: batchId,
-      request_id: requestId,
-      status: "exception",
-      http_status: 0,
-      execution_ms: Date.now() - startTime,
-    });
-  }
-}
-
-/**
  * Comparação em lote: 2–10 arquivos, XLSX consolidado em disco.
  * multipart field: files[]
- *
- * Responde 202 Accepted imediatamente após validação leve e dispara o
- * processamento pesado em background. O cliente acompanha via
- * GET /api/compare-batch/:batchId/status.
  */
 app.post(
   "/api/compare-batch",
@@ -566,34 +369,9 @@ app.post(
   requireBatchApiKey,
   upload.array("files", 10),
   async (req, res) => {
-    const startTime = Date.now();
+  const startTime = Date.now();
+  try {
     const files = req.files || [];
-
-    const fc = validateFileCount(files.length);
-    if (!fc.ok) {
-      const http = fc.code === BATCH_ERROR_CODES.FILE_COUNT ? 400 : 400;
-      logBatchEvent({
-        event: "batch_compare",
-        route: "POST /api/compare-batch",
-        request_id: req.correlationId,
-        status: "pipeline_error",
-        http_status: http,
-        execution_ms: Date.now() - startTime,
-      });
-      return res.status(http).json({
-        status: "error",
-        backend: "pipeline-batch",
-        batch_api_version: BATCH_API_VERSION,
-        code: fc.code,
-        error: fc.message,
-        files_received: files.length,
-        files_parsed: 0,
-        quotes_extracted: 0,
-        executionTime: `${((Date.now() - startTime) / 1000).toFixed(2)}s`,
-        request_id: req.correlationId,
-      });
-    }
-
     const skipOpenAI =
       req.body?.skip_openai === "1" ||
       req.query?.skip_openai === "1" ||
@@ -602,140 +380,112 @@ app.post(
       (req.body?.rfq_id && String(req.body.rfq_id).trim()) ||
       (req.body?.quotation_id && String(req.body.quotation_id).trim()) ||
       null;
+
     const debug =
       req.query?.debug === "1" ||
       req.body?.debug === "1" ||
       req.body?.debug === 1;
 
-    const batchId = generateBatchId();
-    const createdAt = new Date().toISOString();
-    const fileNames = files.map((f) => f.originalname || "unknown");
-
-    try {
-      batchHistoryStore.createPendingBatch({
-        batch_id: batchId,
-        created_at: createdAt,
-        job_started_at: createdAt,
-        request_summary: {
-          files_received: files.length,
-          file_names: fileNames,
-        },
-      });
-    } catch (e) {
-      console.error("[batch-async] createPendingBatch falhou:", e && e.message);
-    }
-
-    const statusUrl = `/api/compare-batch/${batchId}/status`;
-    res.status(202).json({
-      status: "accepted",
-      backend: "pipeline-batch",
-      batch_api_version: BATCH_API_VERSION,
-      batch_id: batchId,
-      job_status: "processing",
-      statusUrl,
-      request_id: req.correlationId,
-    });
-
-    logBatchEvent({
-      event: "batch_compare_accepted",
-      route: "POST /api/compare-batch",
-      batch_id: batchId,
-      request_id: req.correlationId,
-      status: "accepted",
-      http_status: 202,
-      execution_ms: Date.now() - startTime,
-    });
-
-    const fileSpecs = files.map((f) => ({
-      buffer: f.buffer,
-      originalname: f.originalname || "unknown.xlsx",
-    }));
-    const host = req.get("host") || `localhost:${process.env.PORT || 3000}`;
-    const proto = req.protocol || "http";
-
-    setImmediate(() => {
-      processBatchInBackground({
-        batchId,
-        fileSpecs,
+    const result = await runCompareBatch({
+      files: files.map((f) => ({
+        buffer: f.buffer,
+        originalname: f.originalname || "unknown.xlsx",
+      })),
+      options: {
         skipOpenAI,
+        tempDir: BATCH_EXPORT_DIR,
+        publicDownloadPath: "/downloads",
         sharedQuotationId,
-        debug,
-        host,
-        proto,
-        fileNames,
-        requestId: req.correlationId,
-        startTime,
-      }).catch((e) => {
-        console.error("[batch-async] unhandled background error:", e && e.message);
-        try {
-          batchHistoryStore.updateJobStatus(batchId, {
-            job_status: "error",
-            job_error: {
-              code: "BACKGROUND_CRASH",
-              message: e && e.message ? e.message : String(e),
-            },
-          });
-        } catch (_err) {
-          /* ignore */
-        }
-      });
+      },
     });
-  }
-);
 
-/**
- * Polling do cliente: devolve `job_status` e, quando ready, o resultado
- * completo (shape idêntico ao da resposta síncrona antiga).
- */
-app.get(
-  "/api/compare-batch/:batchId/status",
-  requireBatchApiKey,
-  (req, res) => {
-    const id = req.params.batchId || "";
-    const t0 = Date.now();
-    if (!BATCH_ID_PATH_RE.test(id)) {
-      return res.status(400).json({
-        status: "error",
-        error: "batch_id inválido.",
-        request_id: req.correlationId,
-      });
-    }
-    const rec = batchHistoryStore.loadBatchRecord(id);
-    if (!rec) {
+    if (result.status === "error") {
+      const code = result.code;
+      const http =
+        code === BATCH_ERROR_CODES.FILE_COUNT ? 400 : code === BATCH_ERROR_CODES.MIN_QUOTES ? 422 : 400;
       logBatchEvent({
-        event: "batch_status",
-        route: "GET /api/compare-batch/:batchId/status",
-        batch_id: id,
+        event: "batch_compare",
+        route: "POST /api/compare-batch",
         request_id: req.correlationId,
-        status: "not_found",
-        http_status: 404,
-        execution_ms: Date.now() - t0,
+        status: "pipeline_error",
+        http_status: http,
+        execution_ms: Date.now() - startTime,
       });
-      return res.status(404).json({
-        status: "error",
-        error: "Lote não encontrado no histórico.",
-        request_id: req.correlationId,
-      });
+      return res.status(http).json({ ...result, request_id: req.correlationId });
     }
-    const cached = batchResultCache.get(id) || null;
-    const payload = shapeBatchStatusResponse(rec, cached);
+
+    const rel = result.downloadUrl || `/downloads/${result.export_filename}`;
+    const publicBase = getBatchExportPublicBaseUrl();
+    if (publicBase) {
+      const fn = encodeURIComponent(result.export_filename || "").replace(/%2F/g, "/");
+      result.downloadUrl = `${publicBase}/downloads/${fn}`;
+    } else {
+      const host = req.get("host") || `localhost:${process.env.PORT || 3000}`;
+      const proto = req.protocol || "http";
+      result.downloadUrl = `${proto}://${host}${rel.startsWith("/") ? rel : `/${rel}`}`;
+    }
+
+    if (result.status === "success") {
+      try {
+        const snap = batchSnapshotStore.buildSnapshotFromCompareResult(result);
+        const snapInfo = batchSnapshotStore.saveSnapshot(result.batch_id, snap);
+        const exportMeta = getBatchExportStore().getMetadataForFile(result.export_filename);
+        batchHistoryStore.saveBatchRecord({
+          batch_id: result.batch_id,
+          created_at: result.created_at,
+          request_summary: {
+            files_received: result.files_received,
+            file_names: (req.files || []).map((f) => f.originalname || "unknown"),
+          },
+          review_summary: result.review_summary,
+          ai_comparison_feedback: result.ai_comparison_feedback,
+          comparison_result_summary: result.comparison_result_summary,
+          export_filename: result.export_filename,
+          export_path: result.export_filename,
+          ...exportMeta,
+          export_generated_at: result.export_generated_at,
+          export_last_updated_at: result.export_last_updated_at,
+          snapshot_relative_path: snapInfo.relative,
+          snapshot_created_at: new Date().toISOString(),
+          decision_status: result.decision_status,
+          metrics_summary: result.metrics_summary,
+          audit_log: [],
+        });
+      } catch (persistErr) {
+        console.error("[batch-history] persist:", persistErr.message);
+      }
+    }
+
+    const out = shapeCompareBatchResponse(result, debug);
     logBatchEvent({
-      event: "batch_status",
-      route: "GET /api/compare-batch/:batchId/status",
-      batch_id: id,
+      event: "batch_compare",
+      route: "POST /api/compare-batch",
+      batch_id: result.batch_id,
       request_id: req.correlationId,
       status: "ok",
       http_status: 200,
-      execution_ms: Date.now() - t0,
-      job_status: payload.job_status,
+      execution_ms: Date.now() - startTime,
     });
-    return res.json({
-      status: "ok",
+    return res.json({ ...out, request_id: req.correlationId });
+  } catch (err) {
+    logBatchEvent({
+      event: "batch_compare",
+      route: "POST /api/compare-batch",
       request_id: req.correlationId,
-      ...payload,
+      status: "exception",
+      http_status: 500,
+      execution_ms: Date.now() - startTime,
+    });
+    return res.status(500).json({
+      status: "error",
+      backend: "pipeline-batch",
+      code: "INTERNAL_ERROR",
+      message: "Erro interno ao processar lote.",
+      executionTime: `${((Date.now() - startTime) / 1000).toFixed(2)}s`,
+      request_id: req.correlationId,
     });
   }
-);
+});
 
 app.get("/health", (req, res) => {
   res.json({

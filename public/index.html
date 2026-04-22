@@ -1380,55 +1380,6 @@
       setStatus("", "Lote pronto (" + selectedFiles.length + " arquivos). Clique em Comparar com IA.");
     }
 
-    /**
-     * Polling da API /api/compare-batch/:batchId/status.
-     * Mantém a conexão do cliente curta (HTTP independentes por tentativa) —
-     * evita que proxies/Wi-Fi residencial derrubem sockets idle durante o
-     * processamento do backend. Resolve com `{ result }` quando pronto ou
-     * rejeita com erro descritivo em caso de falha/timeout.
-     */
-    async function pollBatchStatus(statusUrl, opts){
-      const options = opts || {};
-      const intervalMs = options.intervalMs || 3000;
-      const maxMs = options.maxMs || 10 * 60 * 1000;
-      const startedAt = Date.now();
-      let attempt = 0;
-      while (true) {
-        attempt++;
-        if (Date.now() - startedAt > maxMs) {
-          const err = new Error("Tempo limite de espera atingido ao aguardar o processamento do lote.");
-          err.code = "POLL_TIMEOUT";
-          throw err;
-        }
-        let resp;
-        try {
-          resp = await fetch(statusUrl, { method: "GET" });
-        } catch (e) {
-          if (attempt > 3) throw e;
-          await new Promise((r) => setTimeout(r, intervalMs));
-          continue;
-        }
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          const err = new Error((data && (data.error || data.message)) || ("HTTP " + resp.status));
-          err.httpStatus = resp.status;
-          err.responseData = data;
-          throw err;
-        }
-        if (data.job_status === "ready") {
-          return data.result || {};
-        }
-        if (data.job_status === "error") {
-          const msg = (data.job_error && data.job_error.message) || "Falha no processamento do lote.";
-          const err = new Error(msg);
-          err.code = (data.job_error && data.job_error.code) || "PIPELINE_ERROR";
-          err.responseData = data;
-          throw err;
-        }
-        await new Promise((r) => setTimeout(r, intervalMs));
-      }
-    }
-
     async function runBatch(){
       if (!canCompare()) return;
 
@@ -1436,7 +1387,7 @@
       setStatus("loading",
         '<div style="display:flex;align-items:center;gap:10px;">' +
           '<div class="spinner"></div>' +
-          "<span>Enviando arquivos…</span>" +
+          "<span>Processando lote com resumo OpenAI…</span>" +
         "</div>"
       );
       btnCompareAI.disabled = true;
@@ -1447,6 +1398,7 @@
         formData.append("rfq_id", "DF-" + new Date().getFullYear() + "-" + String(Date.now()).slice(-6));
 
         const resp = await fetch(API_COMPARE_BATCH, { method: "POST", body: formData });
+
         const data = await resp.json().catch(() => ({}));
 
         if (!resp.ok || data.status === "error"){
@@ -1460,26 +1412,8 @@
           return;
         }
 
-        // Caminho assíncrono (202): backend enfileirou o job e devolveu statusUrl para polling.
-        if (resp.status === 202 && data.statusUrl) {
-          setStatus("loading",
-            '<div style="display:flex;align-items:center;gap:10px;">' +
-              '<div class="spinner"></div>' +
-              "<span>Processando lote com resumo OpenAI…</span>" +
-            "</div>"
-          );
-          const result = await pollBatchStatus(data.statusUrl);
-          revealDownloadSuccess(result);
-          const okMsg =
-            "✅ Lote concluído" +
-            (result.executionTime ? " em " + result.executionTime : "") +
-            (result.manual_review_required ? " — revisão manual indicada" : "");
-          setStatus("ok", okMsg);
-          return;
-        }
-
-        // Retrocompatível: backend antigo responde 200 com o payload completo direto.
         revealDownloadSuccess(data);
+
         const okMsg =
           "✅ Lote concluído" +
           (data.executionTime ? " em " + data.executionTime : "") +
@@ -1487,15 +1421,8 @@
         setStatus("ok", okMsg);
       } catch (err){
         console.error(err);
-        const httpStatus = err && err.httpStatus ? err.httpStatus : 0;
-        const payload = err && err.responseData ? err.responseData : {};
-        const mapped =
-          window.BatchResultUi && BatchResultUi.mapBatchErrorMessage
-            ? BatchResultUi.mapBatchErrorMessage(payload, httpStatus)
-            : null;
-        const msg = mapped || err.message || "Erro desconhecido";
-        setStatus("err", "❌ " + msg);
-        revealOutcomeErrorState(err, httpStatus, payload);
+        setStatus("err", "❌ " + (err.message || "Erro desconhecido"));
+        revealOutcomeErrorState(err, 0, {});
       } finally {
         btnCompareAI.disabled = !canCompare();
       }
