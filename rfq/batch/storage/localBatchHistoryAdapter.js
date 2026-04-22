@@ -2,9 +2,20 @@
  * Adapter: histórico batch em filesystem local (JSON por arquivo).
  */
 
+const fs = require("fs");
 const path = require("path");
 const { writeJsonAtomic, readJsonSafe } = require("../jsonFileUtils");
 const { DECISION_STATUS, canTransitionToManualDecision } = require("../batchDecision");
+
+/**
+ * Estados do processamento assíncrono do lote.
+ * Independente de `decision_status` (que é sobre decisão humana).
+ */
+const JOB_STATUS = Object.freeze({
+  PROCESSING: "processing",
+  READY: "ready",
+  ERROR: "error",
+});
 
 class LocalBatchHistoryAdapter {
   /**
@@ -32,6 +43,10 @@ class LocalBatchHistoryAdapter {
       batch_id: payload.batch_id,
       created_at: payload.created_at,
       updated_at: now,
+      job_status: payload.job_status || JOB_STATUS.READY,
+      job_started_at: payload.job_started_at != null ? payload.job_started_at : payload.created_at,
+      job_finished_at: payload.job_finished_at != null ? payload.job_finished_at : now,
+      job_error: payload.job_error != null ? payload.job_error : null,
       decision_status: payload.decision_status,
       request_summary: payload.request_summary,
       review_summary: payload.review_summary,
@@ -60,6 +75,92 @@ class LocalBatchHistoryAdapter {
     };
     writeJsonAtomic(filePath, record);
     return record;
+  }
+
+  /**
+   * Grava o registro inicial de um lote em processamento assíncrono.
+   * O record mínimo permite que o GET /status responda imediatamente
+   * enquanto o runCompareBatch executa em background.
+   */
+  createPendingBatch(payload, dirOverride) {
+    const now = new Date().toISOString();
+    const filePath = this.historyFilePath(payload.batch_id, dirOverride);
+    const record = {
+      batch_id: payload.batch_id,
+      created_at: payload.created_at || now,
+      updated_at: now,
+      job_status: JOB_STATUS.PROCESSING,
+      job_started_at: payload.job_started_at || now,
+      job_finished_at: null,
+      job_error: null,
+      decision_status: null,
+      request_summary: payload.request_summary || null,
+      review_summary: null,
+      ai_comparison_feedback: null,
+      comparison_result_summary: null,
+      export_filename: null,
+      export_path: null,
+      export_uri: null,
+      export_provider: "local",
+      export_etag: null,
+      export_size_bytes: null,
+      export_generated_at: null,
+      export_last_updated_at: null,
+      snapshot_relative_path: null,
+      snapshot_created_at: null,
+      snapshot_last_checked_at: null,
+      snapshot_deleted_at: null,
+      retention_policy_applied: null,
+      artifact_deleted_at: null,
+      metrics_summary: null,
+      audit_log: [],
+      artifact_warnings: [],
+    };
+    writeJsonAtomic(filePath, record);
+    return record;
+  }
+
+  /**
+   * Atualiza `job_status` e campos correlatos (`job_finished_at`, `job_error`).
+   * Usado quando o processamento background conclui ou falha.
+   */
+  updateJobStatus(batchId, fields, dirOverride) {
+    const rec = this.loadBatchRecord(batchId, dirOverride);
+    if (!rec) return { ok: false, code: "NOT_FOUND" };
+    const now = new Date().toISOString();
+    if (fields.job_status) rec.job_status = fields.job_status;
+    if (fields.job_status === JOB_STATUS.READY || fields.job_status === JOB_STATUS.ERROR) {
+      rec.job_finished_at = fields.job_finished_at || now;
+    }
+    if (fields.job_error !== undefined) rec.job_error = fields.job_error;
+    rec.updated_at = now;
+    writeJsonAtomic(this.historyFilePath(batchId, dirOverride), rec);
+    return { ok: true, record: rec };
+  }
+
+  /**
+   * Lista lotes com `job_status === "processing"`. Útil no startup
+   * para varrer e marcar como error registros órfãos após restart.
+   */
+  listPendingBatches(dirOverride) {
+    const dir = this.getHistoryDir(dirOverride);
+    try {
+      if (!fs.existsSync(dir)) return [];
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+      const out = [];
+      for (const f of files) {
+        const full = path.join(dir, f);
+        const r = readJsonSafe(full);
+        if (!r.ok) continue;
+        if (r.data && r.data.job_status === JOB_STATUS.PROCESSING) {
+          out.push(r.data);
+        }
+      }
+      return out;
+    } catch (e) {
+      console.warn("[batch-history] listPendingBatches falhou:", e && e.message);
+      return [];
+    }
   }
 
   updateRetentionFields(batchId, fields, dirOverride) {
@@ -152,4 +253,5 @@ class LocalBatchHistoryAdapter {
 
 module.exports = {
   LocalBatchHistoryAdapter,
+  JOB_STATUS,
 };

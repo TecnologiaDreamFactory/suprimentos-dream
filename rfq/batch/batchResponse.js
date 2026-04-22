@@ -51,6 +51,61 @@ function shapeCompareBatchResponse(result, debug) {
   };
 }
 
+/**
+ * Shape enxuto para GET /api/compare-batch/:batchId/status.
+ * - processing: devolve só metadados do lote.
+ * - error: devolve job_error.
+ * - ready: devolve o resultado completo cacheado em memória (idêntico à
+ *   resposta síncrona antiga). Quando o cache estiver vazio (ex.: restart
+ *   entre o término do job e o polling), retorna um fallback enxuto a
+ *   partir do record histórico para o cliente ainda conseguir baixar.
+ *
+ * @param {object} rec Record do histórico persistido
+ * @param {object|null} cached Resultado completo em cache (shapeCompareBatchResponse)
+ */
+function shapeBatchStatusResponse(rec, cached) {
+  const base = {
+    batch_id: rec.batch_id,
+    job_status: rec.job_status || "ready",
+    created_at: rec.created_at,
+    job_started_at: rec.job_started_at || rec.created_at,
+    job_finished_at: rec.job_finished_at || null,
+  };
+  if (rec.job_status === "processing") {
+    return base;
+  }
+  if (rec.job_status === "error") {
+    return {
+      ...base,
+      job_error: rec.job_error || { code: "UNKNOWN", message: "Erro desconhecido" },
+    };
+  }
+  if (cached) {
+    return {
+      ...base,
+      result: cached,
+    };
+  }
+  return {
+    ...base,
+    result: {
+      status: "success",
+      backend: "pipeline-batch",
+      batch_id: rec.batch_id,
+      created_at: rec.created_at,
+      decision_status: rec.decision_status,
+      metrics_summary: rec.metrics_summary,
+      comparison_result_summary: rec.comparison_result_summary,
+      review_summary: rec.review_summary,
+      ai_comparison_feedback: rec.ai_comparison_feedback,
+      export_filename: rec.export_filename,
+      downloadUrl: null,
+      _cache_miss: true,
+    },
+  };
+}
+
 module.exports = {
   shapeCompareBatchResponse,
+  shapeBatchStatusResponse,
 };

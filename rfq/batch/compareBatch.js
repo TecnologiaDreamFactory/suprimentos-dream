@@ -78,9 +78,19 @@ function buildBatchComparisonResult(quotes, extraAlerts = []) {
 }
 
 /**
+ * Gera um batch_id canônico no mesmo formato usado internamente.
+ * Exposto para permitir pré-geração no endpoint assíncrono (202 + polling),
+ * mantendo o ID consistente entre a resposta imediata e o registro final.
+ * @returns {string}
+ */
+function generateBatchId() {
+  return `B-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+/**
  * @param {object} params
  * @param {{ buffer: Buffer, originalname: string }[]} params.files
- * @param {{ skipOpenAI?: boolean, tempDir: string, publicDownloadPath?: string, sharedQuotationId?: string|null }} params.options
+ * @param {{ skipOpenAI?: boolean, tempDir: string, publicDownloadPath?: string, sharedQuotationId?: string|null, batchId?: string }} params.options
  */
 async function runCompareBatch(params) {
   const { files, options = {} } = params;
@@ -90,7 +100,9 @@ async function runCompareBatch(params) {
   const start = Date.now();
   const created_at = new Date().toISOString();
 
-  const batchId = `B-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const batchId = options.batchId && typeof options.batchId === "string" && options.batchId.trim()
+    ? options.batchId.trim()
+    : generateBatchId();
   const fc = validateFileCount(files.length);
   if (!fc.ok) {
     return {
@@ -403,4 +415,5 @@ async function runCompareBatch(params) {
 module.exports = {
   runCompareBatch,
   buildBatchComparisonResult,
+  generateBatchId,
 };
